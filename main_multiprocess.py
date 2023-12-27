@@ -2,9 +2,10 @@ import os
 import cv2
 import numpy as np
 import pandas as pd
+import multiprocessing
 from scipy.signal import lfilter, find_peaks, butter
 
-# model for face detection
+# Model for face detection
 prototxt_rgb = r".\model\rgb.prototxt"
 caffemodel_rgb = r".\model\rgb.caffemodel"
 net_rgb = cv2.dnn.readNetFromCaffe(
@@ -44,17 +45,11 @@ def find_peak_distance(data, threshold=0.5, lowcut=0.7, highcut=5, fs=30):
     distances = np.diff(peaks)
     return distances
 
-def process_video(video_path):
+def process_video(video_path, df, output_folder, video_name):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error opening video file: {video_path}")
         return
-    video_name = os.path.splitext(os.path.basename(video_path))[0]
-    output_folder = 'output'
-    os.makedirs(output_folder, exist_ok=True)  # make sure output folder exists
-    output_csv_path = os.path.join(output_folder, f"{video_name}_output.csv")
-
-    df = pd.DataFrame(columns=["R", "G", "B", "DC_red", "DC_green", "DC_blue", "AC_red", "AC_green", "AC_blue", "RR", "SPO2"])
 
     frame_count = 0
     buffer_size = 100
@@ -66,18 +61,18 @@ def process_video(video_path):
     highcut = 5
     fs = 30
 
+    
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
         frame = cv2.flip(frame, 1)
         detected_faces = detect_faces(frame)
 
         for (x, y, w, h) in detected_faces:
-            x0 = max(0, x - 10)
-            y0 = max(0, y - 10)
-            x1 = min(frame.shape[1], x + w + 10)
-            y1 = min(frame.shape[0], y + h + 10)
+            x0, y0, x1, y1 = max(0, x - 10), max(0, y - 10), min(frame.shape[1], x + w + 10), min(frame.shape[0], y + h + 10)
             face_color = extract_face_color(frame, x0, y0, x1 - x0, y1 - y0)
             r, g, b = face_color
             red_buffer.append(r)
@@ -89,23 +84,17 @@ def process_video(video_path):
             DC_red = np.mean(red_buffer)
             DC_green = np.mean(green_buffer)
             DC_blue = np.mean(blue_buffer)
-            
+
             df.loc[df.index[-1], 'DC_red'] = DC_red
             df.loc[df.index[-1], 'DC_green'] = DC_green
             df.loc[df.index[-1], 'DC_blue'] = DC_blue
 
-            if len(red_buffer or green_buffer or blue_buffer ) > buffer_size:
+            if len(red_buffer) > buffer_size:
                 red_buffer.pop(0)
                 green_buffer.pop(0)
                 blue_buffer.pop(0)
 
-
-                # AC_red = r-DC_red
-                # AC_green = g-DC_green
-                # AC_blue = b-DC_blue
-                AC_red = abs(r-DC_red)
-                AC_green = abs(g-DC_green)
-                AC_blue = abs(b-DC_blue)
+                AC_red, AC_green, AC_blue = r - DC_red, g - DC_green, b - DC_blue
 
                 df.loc[df.index[-1], 'AC_red'] = AC_red
                 df.loc[df.index[-1], 'AC_green'] = AC_green
@@ -115,24 +104,21 @@ def process_video(video_path):
                 df['AC_green_filtered'] = butter_bandpass_filter(df['AC_green'].values, lowcut, highcut, fs)
                 df['AC_blue_filtered'] = butter_bandpass_filter(df['AC_blue'].values, lowcut, highcut, fs)
 
-                AC_red_filtered = df['AC_red_filtered'].values
-                AC_green_filtered = df['AC_green_filtered'].values
-                AC_blue_filtered = df['AC_blue_filtered'].values
+                AC_red_filtered, AC_green_filtered, AC_blue_filtered = df['AC_red_filtered'].values, df['AC_green_filtered'].values, df['AC_blue_filtered'].values
 
-                # RR = (AC_red/DC_red) / (AC_blue/DC_blue)
-                RR = (np.mean(AC_red_filtered)/DC_red) / (np.mean(AC_blue_filtered)/DC_blue)
+                RR = (np.mean(AC_red_filtered) / DC_red) / (np.mean(AC_blue_filtered) / DC_blue)
                 df.loc[df.index[-1], 'RR'] = RR
 
-                SPO2 = 98.49768132987977 + (-0.0016348945092368532) * RR
+                SPO2 = 96.2200388975547 + (-0.012162390435191146) * RR
                 df.loc[df.index[-1], 'SPO2'] = SPO2
 
             cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 0), 2)
 
             frame_count += 1
             print(frame_count)
-        # to limit the frame count
+
         if frame_count == 5400:
-                break
+            break
 
         lower_skin = np.array([0, 20, 70], dtype="uint8")
         upper_skin = np.array([20, 255, 255], dtype="uint8")
@@ -140,10 +126,7 @@ def process_video(video_path):
 
         face_mask = np.zeros_like(hsv_frame[:, :, 0])
         for (x, y, w, h) in detected_faces:
-            x0 = max(0, x - 10)
-            y0 = max(0, y - 10)
-            x1 = min(frame.shape[1], x + w + 10)
-            y1 = min(frame.shape[0], y + h + 10)
+            x0, y0, x1, y1 = max(0, x - 10), max(0, y - 10), min(frame.shape[1], x + w + 10), min(frame.shape[0], y + h + 10)
             face_mask[y0:y1, x0:x1] = 255
 
         kernel_erode = np.ones((17, 17), np.uint8)
@@ -162,20 +145,45 @@ def process_video(video_path):
         if key == ord("q"):
             break
 
-    df.to_csv(output_csv_path, index=False)
     cap.release()
+
+    # Save the DataFrame to CSV after processing each video
+    # output_csv_path = os.path.join(output_folder, f"{video_name}_output.csv")
+    output_csv_path = os.path.join(output_folder, f"{video_name}_output.csv")
+    df.to_csv(output_csv_path, index=False)
     cv2.destroyAllWindows()
 
-def process_videos_in_folder(folder_path):
-    for filename in os.listdir(folder_path):
-        # if filename.endswith("Sub_1.avi"):
-        if filename.endswith("video.avi"):
-            video_path = os.path.join(folder_path, filename)
-            process_video(video_path)
+def process_video_wrapper(args):
+    video_path, df, output_folder, video_name = args
+    process_video(video_path, df, output_folder, video_name)
 
 def main():
-    folder_path = r'.\data'  # saving all the videos in the data folder
-    process_videos_in_folder(folder_path)
+    # base_folder = 'VIPL-HR_dataset/data/'  # specify the path to your base folder
+    base_folder = r'Z:\VIPL-HR_dataset\data'
+    output_folder = 'video_output'
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Use multiprocessing to parallelize video processing
+    pool = multiprocessing.Pool(processes=5)  # Adjust the number of processes as needed
+
+    video_tasks = []
+    for p_folder in os.listdir(base_folder):
+        p_path = os.path.join(base_folder, p_folder)
+        if os.path.isdir(p_path):
+            v_path = os.path.join(p_path, 'v1')  # 直接指定為 'v1'
+            if os.path.isdir(v_path):
+                for source_folder in os.listdir(v_path):
+                    source_path = os.path.join(v_path, source_folder)
+                    if os.path.isdir(source_path):
+                        video_path = os.path.join(source_path, "video.avi")
+                        combined_df = pd.DataFrame(columns=["R", "G", "B", "DC_red", "DC_green", "DC_blue", "AC_red", "AC_green", "AC_blue", "RR", "SPO2"])
+                        video_tasks.append((video_path, combined_df, output_folder, f"{p_folder}_{source_folder}"))
+
+    pool.map(process_video_wrapper, video_tasks)
+    pool.close()
+    pool.join()
 
 if __name__ == '__main__':
+    main()
+
     main()

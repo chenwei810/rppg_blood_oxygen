@@ -20,8 +20,8 @@ for csv_file in csv_files:
     # Read the CSV file
     df = pd.read_csv(input_file_path)
 
-    # Take the 12800 rows
-    df = df.head(12800)
+    # Take the 5400 rows
+    df = df.head(5400)
 
     # Perform the operation: same column, (row1+row2)/2, (row3+row4)/2, and so on
     result_df = df.groupby(df.index // 2)[target_column].mean().reset_index()
