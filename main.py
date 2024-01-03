@@ -30,7 +30,7 @@ def extract_face_color(frame, x, y, w, h):
     mean_color = np.mean(face_roi, axis=(0, 1))
     return mean_color
 
-def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=2):
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
@@ -38,11 +38,9 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     y = lfilter(b, a, data)
     return y
 
-def find_peak_distance(data, threshold=0.5, lowcut=0.7, highcut=5, fs=30):
-    filtered_data = butter_bandpass_filter(data, lowcut, highcut, fs)
-    peaks, _ = find_peaks(filtered_data, height=threshold)
-    distances = np.diff(peaks)
-    return distances
+def moving_average(data, window_size):
+    window = np.ones(window_size) / float(window_size)
+    return np.convolve(data, window, 'same')
 
 def process_video(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -65,6 +63,7 @@ def process_video(video_path):
     lowcut = 0.7
     highcut = 5
     fs = 30
+    window_size = 5  # Define window_size before the loop
 
     while True:
         ret, frame = cap.read()
@@ -84,33 +83,37 @@ def process_video(video_path):
             green_buffer.append(g)
             blue_buffer.append(b)
 
-            df = pd.concat([df, pd.DataFrame({"R": [r], "G": [g], "B": [b], "DC_red": [0], "DC_green": [0], "DC_blue": [0], "AC_red": [0], "AC_green": [0], "AC_blue": [0], "RR": [0], "SPO2": [0]})], ignore_index=True)
+            df = pd.concat([df, pd.DataFrame({"R": [0], "G": [0], "B": [0], "DC_red": [0], "DC_green": [0], "DC_blue": [0], "AC_red": [0], "AC_green": [0], "AC_blue": [0], "RR": [0], "SPO2": [0]})], ignore_index=True)
 
-            DC_red = np.mean(red_buffer)
-            DC_green = np.mean(green_buffer)
-            DC_blue = np.mean(blue_buffer)
+            DC_red = moving_average(red_buffer, window_size)[-1]
+            DC_green = moving_average(green_buffer, window_size)[-1]
+            DC_blue = moving_average(blue_buffer, window_size)[-1]
+
+            # Applying moving average to DC_red
             
-            df.loc[df.index[-1], 'DC_red'] = DC_red
-            df.loc[df.index[-1], 'DC_green'] = DC_green
-            df.loc[df.index[-1], 'DC_blue'] = DC_blue
+            # df.loc[df.index[-1], 'DC_red'] = DC_red
+            # df.loc[df.index[-1], 'DC_green'] = DC_green
+            # df.loc[df.index[-1], 'DC_blue'] = DC_blue
+            
 
-            if len(red_buffer or green_buffer or blue_buffer ) > buffer_size:
+            if len(red_buffer or green_buffer or blue_buffer) > buffer_size:
                 red_buffer.pop(0)
                 green_buffer.pop(0)
                 blue_buffer.pop(0)
 
 
-                # AC_red = r-DC_red
-                # AC_green = g-DC_green
-                # AC_blue = b-DC_blue
-                AC_red = abs(r-DC_red)
-                AC_green = abs(g-DC_green)
-                AC_blue = abs(b-DC_blue)
+            if frame_count > buffer_size:
+                df.loc[df.index[-1], 'DC_red'] = DC_red
+                df.loc[df.index[-1], 'DC_green'] = DC_green
+                df.loc[df.index[-1], 'DC_blue'] = DC_blue
+
+                AC_red = r-DC_red
+                AC_green = g-DC_green
+                AC_blue = b-DC_blue
 
                 df.loc[df.index[-1], 'AC_red'] = AC_red
                 df.loc[df.index[-1], 'AC_green'] = AC_green
                 df.loc[df.index[-1], 'AC_blue'] = AC_blue
-
                 df['AC_red_filtered'] = butter_bandpass_filter(df['AC_red'].values, lowcut, highcut, fs)
                 df['AC_green_filtered'] = butter_bandpass_filter(df['AC_green'].values, lowcut, highcut, fs)
                 df['AC_blue_filtered'] = butter_bandpass_filter(df['AC_blue'].values, lowcut, highcut, fs)
@@ -118,12 +121,20 @@ def process_video(video_path):
                 AC_red_filtered = df['AC_red_filtered'].values
                 AC_green_filtered = df['AC_green_filtered'].values
                 AC_blue_filtered = df['AC_blue_filtered'].values
+                df['DC_red_filtered'] = butter_bandpass_filter(df['DC_red'].values, lowcut, highcut, fs)
+                df['DC_green_filtered'] = butter_bandpass_filter(df['DC_green'].values, lowcut, highcut, fs)
+                df['DC_blue_filtered'] = butter_bandpass_filter(df['DC_blue'].values, lowcut, highcut, fs)
+                DC_red_filtered = df['DC_red_filtered'].values
+                DC_green_filtered = df['DC_green_filtered'].values
+                DC_blue_filtered = df['DC_blue_filtered'].values
+                
+                
 
                 # RR = (AC_red/DC_red) / (AC_blue/DC_blue)
                 RR = (np.mean(AC_red_filtered)/DC_red) / (np.mean(AC_blue_filtered)/DC_blue)
                 df.loc[df.index[-1], 'RR'] = RR
 
-                SPO2 = 98.49768132987977 + (-0.0016348945092368532) * RR
+                SPO2 = 125 - 28 * RR
                 df.loc[df.index[-1], 'SPO2'] = SPO2
 
             cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 0), 2)
@@ -168,8 +179,7 @@ def process_video(video_path):
 
 def process_videos_in_folder(folder_path):
     for filename in os.listdir(folder_path):
-        # if filename.endswith("Sub_1.avi"):
-        if filename.endswith("video.avi"):
+        if filename.endswith(".avi"):
             video_path = os.path.join(folder_path, filename)
             process_video(video_path)
 
