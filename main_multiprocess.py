@@ -1,37 +1,46 @@
-import os
 import cv2
 import numpy as np
+import mediapipe as mp
 import pandas as pd
+from scipy.signal import butter, lfilter
+import os
 import multiprocessing
-from scipy.signal import lfilter, find_peaks, butter
 
-# Model for face detection
-prototxt_rgb = r".\model\rgb.prototxt"
-caffemodel_rgb = r".\model\rgb.caffemodel"
-net_rgb = cv2.dnn.readNetFromCaffe(
-    prototxt=prototxt_rgb, caffeModel=caffemodel_rgb)
+def mask_nose_forehead(img, face_landmarks):
+    # 定義額頭區域的重要點索引
+    bigger_forehead_indices = [109, 10, 338, 337, 151, 108]
+    
+    # 創建一個與原始圖像相同大小的零矩陣，用於創建額頭區域的遮罩
+    mask_forehead = np.zeros_like(img)
+    
+    # 提取額頭區域的坐標點，根據臉部關鍵點的坐標縮放
+    pts_forehead = np.array([(int(face_landmarks.landmark[i].x * img.shape[1]), 
+                              int(face_landmarks.landmark[i].y * img.shape[0])) for i in bigger_forehead_indices], np.int32)
+    
+    # 將坐標點轉換為遮罩中的多邊形
+    pts_forehead = pts_forehead.reshape((-1, 1, 2))
+    
+    # 使用cv2.fillPoly填充多邊形區域，顏色為白色 (255, 255, 255)
+    cv2.fillPoly(mask_forehead, [pts_forehead], (255, 255, 255))
+    
+    # 使用位元運算計算額頭區域的遮罩後的圖像
+    forehead_masked = cv2.bitwise_and(img, mask_forehead)
+    
+    # 找到被遮罩部分的非黑色區域，並計算通道的平均值
+    forehead_masked_non_black = forehead_masked[np.all(forehead_masked != [0, 0, 0], axis=-1)]
+    forehead_masked_non_black_flat = forehead_masked_non_black.reshape(-1, 3)
+    r_mean = np.mean(forehead_masked_non_black_flat[:, 2])
+    g_mean = np.mean(forehead_masked_non_black_flat[:, 1])
+    b_mean = np.mean(forehead_masked_non_black_flat[:, 0])
 
-def detect_faces(frame, min_confidence=0.5):
-    (h, w) = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104, 177, 123))
-    net_rgb.setInput(blob)
-    detections = net_rgb.forward()
-    faces = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence < min_confidence:
-            continue
-        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-        (x0, y0, x1, y1) = box.astype("int")
-        faces.append((x0, y0, x1 - x0, y1 - y0))
-    return faces
+    # 顯示遮罩後的額頭區域和原始圖像
+    cv2.imshow('forehead', forehead_masked)
+    cv2.imshow('img', img)
 
-def extract_face_color(frame, x, y, w, h):
-    face_roi = frame[y:y+h, x:x+w]
-    mean_color = np.mean(face_roi, axis=(0, 1))
-    return mean_color
+    # 返回計算得到的顏色平均值
+    return {"R": r_mean, "G": g_mean, "B": b_mean}
 
-def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=2):
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
@@ -39,151 +48,126 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     y = lfilter(b, a, data)
     return y
 
-def find_peak_distance(data, threshold=0.5, lowcut=0.7, highcut=5, fs=30):
-    filtered_data = butter_bandpass_filter(data, lowcut, highcut, fs)
-    peaks, _ = find_peaks(filtered_data, height=threshold)
-    distances = np.diff(peaks)
-    return distances
+def process_video(cap, face_mesh, csv_filename):
+    df = pd.DataFrame(columns=["R", "G", "B", "DC_red", "DC_green", "DC_blue", "AC_red", "AC_green", "AC_blue", "RR"])
 
-def process_video(video_path, df, output_folder, video_name):
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error opening video file: {video_path}")
-        return
-
-    frame_count = 0
     buffer_size = 100
     red_buffer = []
     green_buffer = []
     blue_buffer = []
 
-    lowcut = 0.7
-    highcut = 5
-    fs = 30
-
-    
-
+    frame = 1
     while True:
-        ret, frame = cap.read()
+        ret, img_rgb = cap.read()
         if not ret:
             break
 
-        frame = cv2.flip(frame, 1)
-        detected_faces = detect_faces(frame)
+        img_rgb2 = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(img_rgb2)
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                forehead_data = mask_nose_forehead(img_rgb, face_landmarks)
 
-        for (x, y, w, h) in detected_faces:
-            x0, y0, x1, y1 = max(0, x - 10), max(0, y - 10), min(frame.shape[1], x + w + 10), min(frame.shape[0], y + h + 10)
-            face_color = extract_face_color(frame, x0, y0, x1 - x0, y1 - y0)
-            r, g, b = face_color
-            red_buffer.append(r)
-            green_buffer.append(g)
-            blue_buffer.append(b)
+                df = pd.concat([df, pd.DataFrame({
+                    "R": [forehead_data["R"]],
+                    "G": [forehead_data["G"]],
+                    "B": [forehead_data["B"]]
+                })], ignore_index=True)
 
-            df = pd.concat([df, pd.DataFrame({"R": [r], "G": [g], "B": [b], "DC_red": [0], "DC_green": [0], "DC_blue": [0], "AC_red": [0], "AC_green": [0], "AC_blue": [0], "RR": [0], "SPO2": [0]})], ignore_index=True)
+                red_buffer.append(forehead_data["R"])
+                green_buffer.append(forehead_data["G"])
+                blue_buffer.append(forehead_data["B"])
 
-            DC_red = np.mean(red_buffer)
-            DC_green = np.mean(green_buffer)
-            DC_blue = np.mean(blue_buffer)
+                if len(red_buffer) > buffer_size:
+                    red_buffer.pop(0)
+                    green_buffer.pop(0)
+                    blue_buffer.pop(0)
 
-            df.loc[df.index[-1], 'DC_red'] = DC_red
-            df.loc[df.index[-1], 'DC_green'] = DC_green
-            df.loc[df.index[-1], 'DC_blue'] = DC_blue
+                if frame > buffer_size:
+                    DC_red = np.mean(red_buffer)
+                    DC_green = np.mean(green_buffer)
+                    DC_blue = np.mean(blue_buffer)
 
-            if len(red_buffer) > buffer_size:
-                red_buffer.pop(0)
-                green_buffer.pop(0)
-                blue_buffer.pop(0)
+                    # Apply bandpass filter to DC_red
+                    fs = 30  # Adjust the sampling frequency accordingly
+                    lowcut = 0.7
+                    highcut = 3.0
 
-                AC_red, AC_green, AC_blue = r - DC_red, g - DC_green, b - DC_blue
+                    filtered_DC_red = butter_bandpass_filter([DC_red], lowcut, highcut, fs)
+                    filtered_DC_green = butter_bandpass_filter([DC_green], lowcut, highcut, fs)
+                    filtered_DC_blue = butter_bandpass_filter([DC_blue], lowcut, highcut, fs)
 
-                df.loc[df.index[-1], 'AC_red'] = AC_red
-                df.loc[df.index[-1], 'AC_green'] = AC_green
-                df.loc[df.index[-1], 'AC_blue'] = AC_blue
+                    AC_red = forehead_data["R"] - DC_red
+                    AC_green = forehead_data["G"] - DC_green
+                    AC_blue = forehead_data["B"] - DC_blue
 
-                df['AC_red_filtered'] = butter_bandpass_filter(df['AC_red'].values, lowcut, highcut, fs)
-                df['AC_green_filtered'] = butter_bandpass_filter(df['AC_green'].values, lowcut, highcut, fs)
-                df['AC_blue_filtered'] = butter_bandpass_filter(df['AC_blue'].values, lowcut, highcut, fs)
+                    RR = (AC_red/DC_red)/(AC_blue/DC_blue)
 
-                AC_red_filtered, AC_green_filtered, AC_blue_filtered = df['AC_red_filtered'].values, df['AC_green_filtered'].values, df['AC_blue_filtered'].values
+                    df.loc[df.index[-1], 'DC_red'] = DC_red
+                    df.loc[df.index[-1], 'DC_green'] = DC_green
+                    df.loc[df.index[-1], 'DC_blue'] = DC_blue
+                    df.loc[df.index[-1], 'AC_red'] = AC_red
+                    df.loc[df.index[-1], 'AC_green'] = AC_green
+                    df.loc[df.index[-1], 'AC_blue'] = AC_blue
+                    df.loc[df.index[-1], 'RR'] = RR
+                    df.loc[df.index[-1], 'DC_red_filter'] = filtered_DC_red[0]
+                    df.loc[df.index[-1], 'DC_green_filter'] = filtered_DC_green[0]
+                    df.loc[df.index[-1], 'DC_blue_filter'] = filtered_DC_blue[0]
 
-                RR = (np.mean(AC_red_filtered) / DC_red) / (np.mean(AC_blue_filtered) / DC_blue)
-                df.loc[df.index[-1], 'RR'] = RR
+                print(frame)
 
-                SPO2 = 96.2200388975547 + (-0.012162390435191146) * RR
-                df.loc[df.index[-1], 'SPO2'] = SPO2
-
-            cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 0), 2)
-
-            frame_count += 1
-            print(frame_count)
-
-        if frame_count == 5400:
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        lower_skin = np.array([0, 20, 70], dtype="uint8")
-        upper_skin = np.array([20, 255, 255], dtype="uint8")
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        frame += 1
 
-        face_mask = np.zeros_like(hsv_frame[:, :, 0])
-        for (x, y, w, h) in detected_faces:
-            x0, y0, x1, y1 = max(0, x - 10), max(0, y - 10), min(frame.shape[1], x + w + 10), min(frame.shape[0], y + h + 10)
-            face_mask[y0:y1, x0:x1] = 255
+    df.to_csv(csv_filename, index=False)
+    print(f"Data saved to {csv_filename}")
 
-        kernel_erode = np.ones((17, 17), np.uint8)
-        face_mask = cv2.erode(face_mask, kernel_erode, iterations=2)
 
-        kernel_dilate = np.ones((1, 1), np.uint8)
-        face_mask = cv2.dilate(face_mask, kernel_dilate, iterations=2)
 
-        skin_mask = cv2.bitwise_and(cv2.inRange(hsv_frame, lower_skin, upper_skin), face_mask)
-        skin_extracted = cv2.bitwise_and(frame, frame, mask=skin_mask)
+def search_videos(base_folder):
+    output_folder = 'video_output2'
+    video_tasks = []
 
-        cv2.imshow("Real-Time Face Detection", frame)
-        cv2.imshow("Skin Extracted", skin_extracted)
+    for patient_folder in os.listdir(base_folder):
+        patient_path = os.path.join(base_folder, patient_folder)
+        if os.path.isdir(patient_path):
+            video_path = os.path.join(patient_path, 'v1', 'source1', 'video.avi')
+            if os.path.isfile(video_path):
+                output_csv_name = f'{patient_folder}_v1_source1_output.csv'
+                csv_filename = os.path.join(output_folder, output_csv_name)
+                video_tasks.append((video_path, csv_filename))
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-
-    cap.release()
-
-    # Save the DataFrame to CSV after processing each video
-    # output_csv_path = os.path.join(output_folder, f"{video_name}_output.csv")
-    output_csv_path = os.path.join(output_folder, f"{video_name}_output.csv")
-    df.to_csv(output_csv_path, index=False)
-    cv2.destroyAllWindows()
-
-def process_video_wrapper(args):
-    video_path, df, output_folder, video_name = args
-    process_video(video_path, df, output_folder, video_name)
+    return video_tasks
 
 def main():
-    # base_folder = 'VIPL-HR_dataset/data/'  # specify the path to your base folder
-    base_folder = r'Z:\VIPL-HR_dataset\data'
-    output_folder = 'video_output'
-    os.makedirs(output_folder, exist_ok=True)
+    mp_face_mesh = mp.solutions.face_mesh
+    with mp_face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5) as face_mesh:
 
-    # Use multiprocessing to parallelize video processing
-    pool = multiprocessing.Pool(processes=5)  # Adjust the number of processes as needed
+        base_folder = r'Z:\VIPL-HR_dataset\data'
+        # base_folder = r'Z:\SPO2_IRB_Lab_dataset\Sub_9'
+        # Z:\SPO2_IRB_Lab_dataset\Sub_9\Sub_9_face_30fps_2023-08-17 15_12_50.avi
+        output_folder = 'video_output2'
+        os.makedirs(output_folder, exist_ok=True)
 
-    video_tasks = []
-    for p_folder in os.listdir(base_folder):
-        p_path = os.path.join(base_folder, p_folder)
-        if os.path.isdir(p_path):
-            v_path = os.path.join(p_path, 'v1')  # 直接指定為 'v1'
-            if os.path.isdir(v_path):
-                for source_folder in os.listdir(v_path):
-                    source_path = os.path.join(v_path, source_folder)
-                    if os.path.isdir(source_path):
-                        video_path = os.path.join(source_path, "video.avi")
-                        combined_df = pd.DataFrame(columns=["R", "G", "B", "DC_red", "DC_green", "DC_blue", "AC_red", "AC_green", "AC_blue", "RR", "SPO2"])
-                        video_tasks.append((video_path, combined_df, output_folder, f"{p_folder}_{source_folder}"))
+        video_paths = search_videos(base_folder)
 
-    pool.map(process_video_wrapper, video_tasks)
-    pool.close()
-    pool.join()
+        for video_path, csv_filename in video_paths:
+            cap = cv2.VideoCapture(video_path)
+
+            if not cap.isOpened():
+                print(f'Error: Unable to open the video file {video_path}')
+                continue
+
+            process_video(cap, face_mesh, csv_filename)
+
+            cap.release()
+            cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    main()
-
     main()

@@ -8,7 +8,7 @@ def expand_rows(file_path):
 
     # Repeat each unique value in the column 'YourColumnName' 30 times
     expanded_df = pd.DataFrame({
-        'YourColumnName': np.repeat(df['YourColumnName'], 30)
+        'SpO2': np.repeat(df['SpO2'], 25)
         # Add more columns as needed
     })
 
@@ -25,14 +25,14 @@ def process_folders(root_folder):
             for folder_vi in os.listdir(folder_p1_path):
                 folder_vi_path = os.path.join(folder_p1_path, folder_vi)
 
-                # Check if it's a folder, not a file
+                # Check if it's a folder, not a file, and contains 'v1'
                 if os.path.isdir(folder_vi_path) and "v1" in folder_vi:
                     # Third-level folder
                     for folder_source in os.listdir(folder_vi_path):
                         folder_source_path = os.path.join(folder_vi_path, folder_source)
 
-                        # Check if it's a folder, not a file
-                        if os.path.isdir(folder_source_path):
+                        # Check if it's a folder, not a file, and the folder is 'source1'
+                        if os.path.isdir(folder_source_path) and folder_source == 'source1':
                             # Fourth-level folder
                             for file_name in os.listdir(folder_source_path):
                                 if file_name == 'gt_SpO2.csv':
