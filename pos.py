@@ -2,8 +2,7 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import pandas as pd
-from scipy.signal import butter, lfilter
-from scipy.signal import firwin
+from scipy.signal import savgol_filter
 
 def mask_nose_forehead(img, face_landmarks):
     # 定義額頭區域的重要點索引
@@ -33,17 +32,17 @@ def mask_nose_forehead(img, face_landmarks):
     return {"R": r_mean, "G": g_mean, "B": b_mean}
 
 def process_video(cap, face_mesh, csv_filename):
-    df = pd.DataFrame(columns=["R", "G", "B", "DC_red", "DC_green", "DC_blue", "AC_red", "AC_green", "AC_blue"])
+    df = pd.DataFrame(columns=["R", "G", "B", "AC_red", "AC_green", "AC_blue"])
 
     buffer_size = 30
     red_buffer, green_buffer, blue_buffer = [], [], []
     AC_red_buffer, AC_green_buffer, AC_blue_buffer = [], [], []
 
     POS_s1_buffer, POS_s2_buffer = [], []
-    pr_raw_values = []
+    POS_raw_buffer = []
 
     CHROM_x_buffer, CHROM_y_buffer = [], []
-    CHROM_raw_values = []
+    CHROM_raw_buffer = []
 
     frame_count = 0
 
@@ -55,6 +54,12 @@ def process_video(cap, face_mesh, csv_filename):
         frame_count += 1
 
         img_rgb2 = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
+
+        # 對 RGB 訊號應用 Savitzky-Golay 濾波器
+        img_rgb2[:, :, 0] = savgol_filter(img_rgb2[:, :, 0], 51, 4)  # Red channel
+        img_rgb2[:, :, 1] = savgol_filter(img_rgb2[:, :, 1], 51, 4)  # Green channel
+        img_rgb2[:, :, 2] = savgol_filter(img_rgb2[:, :, 2], 51, 4)  # Blue channel
+
         results = face_mesh.process(img_rgb2)
         if results.multi_face_landmarks:
             for face_landmarks in results.multi_face_landmarks:
@@ -111,18 +116,14 @@ def process_video(cap, face_mesh, csv_filename):
                     DC_green = np.mean(green_buffer)
                     DC_blue = np.mean(blue_buffer)
 
-                    AC_red = forehead_data["R"] - DC_red
-                    AC_green = forehead_data["G"] - DC_green
-                    AC_blue = forehead_data["B"] - DC_blue
-
-                    AC_red_buffer = np.append(AC_red_buffer, AC_red)
-                    AC_green_buffer = np.append(AC_green_buffer, AC_green)
-                    AC_blue_buffer = np.append(AC_blue_buffer, AC_blue)
-
-                    if len(AC_red_buffer) > 30:
+                    if len(AC_red_buffer) > buffer_size:
                         AC_red_buffer = AC_red_buffer[1:]
                         AC_green_buffer = AC_green_buffer[1:]
                         AC_blue_buffer = AC_blue_buffer[1:]
+
+                    AC_red_buffer = np.append(AC_red_buffer, red_buffer)
+                    AC_green_buffer = np.append(AC_green_buffer, green_buffer)
+                    AC_blue_buffer = np.append(AC_blue_buffer, blue_buffer)
 
                     max_AC_red = np.max(AC_red_buffer)
                     max_AC_green = np.max(AC_green_buffer)
@@ -131,83 +132,63 @@ def process_video(cap, face_mesh, csv_filename):
                     min_AC_green = np.min(AC_green_buffer)
                     min_AC_blue = np.min(AC_blue_buffer)
 
+                    AC_red = max_AC_red - min_AC_red
+                    AC_green = max_AC_green - min_AC_green
+                    AC_blue = max_AC_blue - min_AC_blue
+
                     # Check if AC_red and AC_blue are positive
-                    
-                    RR = np.log((max_AC_red-min_AC_red)) / np.log((max_AC_blue-min_AC_blue))
+                    RR = AC_red / AC_blue
                 
-                
-                    
-                    df.loc[df.index[-1], 'DC_red'] = DC_red
-                    df.loc[df.index[-1], 'DC_green'] = DC_green
-                    df.loc[df.index[-1], 'DC_blue'] = DC_blue
-                    df.loc[df.index[-1], 'AC_red'] = max_AC_red - min_AC_red
-                    df.loc[df.index[-1], 'AC_green'] = max_AC_green - min_AC_green
-                    df.loc[df.index[-1], 'AC_blue'] = max_AC_blue - min_AC_blue
+                    df.loc[df.index[-1], 'AC_red'] = np.log(AC_red)
+                    df.loc[df.index[-1], 'AC_green'] = np.log(AC_green)
+                    df.loc[df.index[-1], 'AC_blue'] = np.log(AC_blue)
                     df.loc[df.index[-1], 'RR'] = RR
 
                     # For POS Algorithm-----------------------------------------
                     std_s1 = np.std(POS_s1_buffer)
                     std_s2 = np.std(POS_s2_buffer)
                     alpha = std_s1 / std_s2
-                    if len(pr_raw_values) > buffer_size:
-                        pr_raw_values.pop(0)
-
                     POS_raw = std_s1 + (alpha * std_s2)
-                    pr_raw_values.append(POS_raw)# 計算 PR_raw 平均值
-                    POS_mean = np.mean(pr_raw_values)# 計算 PR_raw 標準差
-                    POS_std = np.std(pr_raw_values)# 計算 PR_normalized
+                    if len(POS_raw_buffer) > buffer_size:
+                        POS_raw_buffer.pop(0)
+                    POS_raw_buffer.append(POS_raw)
+                    max_POS = np.max(POS_raw_buffer)
+                    min_POS = np.min(POS_raw_buffer)
 
-                    if POS_std != 0:
-                        POS_normalized = (POS_raw - POS_mean) / POS_std
+                    if (max_POS - min_POS) == 0:
+                        POS_AC = 0
                     else:
-                        # 如果 PR_std 為零，請根據您的需求設置一個預設值，這裡設置為零
-                        POS_normalized = 0
+                        POS_AC = np.log(max_POS - min_POS)
 
-                    # df.loc[df.index[-1], 'S1'] = POS_matrix_operation_result[0]
-                    # df.loc[df.index[-1], 'S2'] = POS_matrix_operation_result[1]
-                    # df.loc[df.index[-1], 'Std_S1'] = std_s1
-                    # df.loc[df.index[-1], 'Std_S2'] = std_s2
-                    df.loc[df.index[-1], 'POS_raw'] = POS_raw
-                    df.loc[df.index[-1], 'POS_DC'] = POS_mean
-                    # df.loc[df.index[-1], 'POS_std'] = POS_std
-                    # df.loc[df.index[-1], 'POS_normalized'] = POS_normalized
-                    df.loc[df.index[-1], 'POS_AC'] = POS_raw - POS_mean
-                    df.loc[df.index[-1], 'POS_normalized'] = POS_normalized
-                    pr_normalized = df["POS_normalized"]
-                    
-                    
-                    # 設計 80 階 FIR 濾波器的係數
-                    order = 80
-                    nyquist = 0.5 * 30  # Nyquist 頻率，這裡假設取樣頻率為 30 Hz
-                    lowcut = 1
-                    highcut = 1.67
-                    cutoff = [lowcut / nyquist, highcut / nyquist]  # 截至頻率，轉換為正規化頻率
+                    df.loc[df.index[-1], 'POS_AC'] = POS_AC
+                    # POS Algorithm END-----------------------------------------
 
-                    # 計算 FIR 濾波器係數
-                    coefficients = firwin(order, cutoff, pass_zero=False)
-                    # 應用 FIR 濾波器到 PR_normalized 資料
-                    fir_filtered = lfilter(coefficients, 1.0, pr_normalized)
-                    # 將處理完的訊號用 PR_filtered 表示
-                    df["fir_filtered"] = fir_filtered
-                    # POS Algorithm-----------------------------------------
-                    
                 # For CHROM Algorithm---------------------------------------
                 chrom_std_x = np.std(CHROM_x_buffer, axis=0)
                 chrom_std_y = np.std(CHROM_y_buffer, axis=0)
                 chrom_alpha = chrom_std_x / chrom_std_y
                 bvp_chrom = chrom_std_x + (chrom_alpha * chrom_std_y)
-                # df.loc[df.index[-1], 'CHROM_X'] = CHROM_matrix_operation_result[0]
-                # df.loc[df.index[-1], 'CHROM_Y'] = CHROM_matrix_operation_result[1]
-                # df.loc[df.index[-1], 'CHROM_S'] = (CHROM_matrix_operation_result[0]/CHROM_matrix_operation_result[1]) - 1
-                df.loc[df.index[-1], 'CHROM_raw'] = bvp_chrom
-                # CHROM Algorithm---------------------------------------
+
+                if len(CHROM_raw_buffer) > buffer_size:
+                    CHROM_raw_buffer.pop(0)
+                CHROM_raw_buffer.append(bvp_chrom)
+                max_CHROM = np.max(CHROM_raw_buffer)
+                min_CHROM = np.min(CHROM_raw_buffer)
+
+                if (max_CHROM - min_CHROM) == 0:
+                    CHROM_AC = 0
+                else:
+                    CHROM_AC = np.log(max_CHROM - min_CHROM)
+
+                df.loc[df.index[-1], 'CHROM_AC'] = CHROM_AC
+                # CHROM Algorithm END---------------------------------------
+
                 print(frame)
             if frame == 9000:
                 break
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
         frame += 1
-
 
     df.to_csv(csv_filename, index=False)
     print(f"Data saved to {csv_filename}")
@@ -219,20 +200,59 @@ def main():
         refine_landmarks=True,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5) as face_mesh:
+        video_path = [
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_9_0\Sub_9_0_face_30fps_2024-03-04 19_35_10.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_18_0\Sub_18_0_face_30fps_2024-03-01 13_21_30.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_18_1\Sub_18_1_face_30fps_2024-03-01 13_27_50.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_19_0\Sub_19_0_face_30fps_2024-03-01 14_43_30.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_19_1\Sub_19_1_face_30fps_2024-03-01 14_49_20.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_21_1\Sub_21_1_face_30fps_2024-02-29 11_44_40.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_21_2\Sub_21_2_face_30fps_2024-02-29 11_51_30.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_22_1\Sub_22_1_face_30fps_2024-02-29 14_45_20.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_22_2\Sub_22_2_face_30fps_2024-02-29 14_51_50.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_23_1\Sub_23_1_face_30fps_2024-02-29 15_39_10.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_23_2\Sub_23_2_face_30fps_2024-02-29 15_50_40.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_24_0\Sub_24_0_face_30fps_2024-03-01 11_27_20.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_24_1\Sub_24_1_face_30fps_2024-03-01 11_35_30.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_25_0\Sub_25_0_face_30fps_2024-03-01 15_23_40.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_25_1\Sub_25_1_face_30fps_2024-03-01 15_29_50.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_26_0\Sub_26_0_face_30fps_2024-03-04 14_49_40.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_26_1\Sub_26_1_face_30fps_2024-03-04 14_55_40.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_29_0\Sub_29_0_face_30fps_2024-03-05 17_59_00.avi',
+            'Z:\SPO2_IRB_Lab_dataset\EE\Sub_30_0\Sub_30_0_face_30fps_2024-03-05 19_23_50.avi',
+        ]
 
-        video_path = r'Z:\SPO2_IRB_Lab_dataset\EE\Sub_21_1\Sub_21_1_face_30fps_2024-02-29 11_44_40.avi'
-        csv_filename = r'Sub21-1.csv'
+        csv_filename = [
+            'output/Sub_9_0.csv',
+            'output/Sub_18_0.csv',
+            'output/Sub_18_1.csv',
+            'output/Sub_19_0.csv',
+            'output/Sub_19_1.csv',
+            'output/Sub_21_1.csv',
+            'output/Sub_21_2.csv',
+            'output/Sub_22_1.csv',
+            'output/Sub_22_2.csv',
+            'output/Sub_23_1.csv',
+            'output/Sub_23_2.csv',
+            'output/Sub_24_0.csv',
+            'output/Sub_24_1.csv',
+            'output/Sub_25_0.csv',
+            'output/Sub_25_1.csv',
+            'output/Sub_26_0.csv',
+            'output/Sub_26_1.csv',
+            'output/Sub_29_0.csv',
+            'output/Sub_30_0.csv',
+        ]
 
-        cap = cv2.VideoCapture(video_path)
+        for video_path, csv_filename in zip(video_path, csv_filename):
+            cap = cv2.VideoCapture(video_path)
 
-        if not cap.isOpened():
-            print(f'Error: Unable to open the video file {video_path}')
-            return
-
-        process_video(cap, face_mesh, csv_filename)
-
-        cap.release()
-        cv2.destroyAllWindows()
+            if not cap.isOpened():
+                print(f'Error: Unable to open the video file {video_path}')
+                return
+            process_video(cap, face_mesh, csv_filename)
+            cap.release()
+            cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()
