@@ -32,7 +32,7 @@ def mask_nose_forehead(img, face_landmarks):
     return {"R": r_mean, "G": g_mean, "B": b_mean}
 
 def process_video(cap, face_mesh, csv_filename):
-    df = pd.DataFrame(columns=["R", "G", "B", "AC_red", "AC_green", "AC_blue"])
+    df = pd.DataFrame(columns=["R", "R_filter", "G", "G_filter", "B", "B_filter", "AC_red", "DC_red", "AC_green", "DC_green", "AC_blue", "DC_blue", "RR", "POS_AC", "CHROM_AC"])
 
     buffer_size = 30
     red_buffer, green_buffer, blue_buffer = [], [], []
@@ -56,9 +56,9 @@ def process_video(cap, face_mesh, csv_filename):
         img_rgb2 = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
 
         # 對 RGB 訊號應用 Savitzky-Golay 濾波器
-        img_rgb2[:, :, 0] = savgol_filter(img_rgb2[:, :, 0], 51, 4)  # Red channel
-        img_rgb2[:, :, 1] = savgol_filter(img_rgb2[:, :, 1], 51, 4)  # Green channel
-        img_rgb2[:, :, 2] = savgol_filter(img_rgb2[:, :, 2], 51, 4)  # Blue channel
+        img_rgb2[:, :, 0] = savgol_filter(img_rgb2[:, :, 0], 30, 4)  # Red channel
+        img_rgb2[:, :, 1] = savgol_filter(img_rgb2[:, :, 1], 30, 4)  # Green channel
+        img_rgb2[:, :, 2] = savgol_filter(img_rgb2[:, :, 2], 30, 4)  # Blue channel
 
         results = face_mesh.process(img_rgb2)
         if results.multi_face_landmarks:
@@ -68,14 +68,17 @@ def process_video(cap, face_mesh, csv_filename):
                 df = pd.concat([df, pd.DataFrame({
                     "R": [forehead_data["R"]],
                     "G": [forehead_data["G"]],
-                    "B": [forehead_data["B"]]
+                    "B": [forehead_data["B"]],
+                    "R_filter": [img_rgb2[:, :, 0].mean()],
+                    "G_filter": [img_rgb2[:, :, 1].mean()],
+                    "B_filter": [img_rgb2[:, :, 2].mean()]
                 })], ignore_index=True)
 
                 # POS Algorithm-----------------------------------------
                 POS_matrix_operation_result = np.array([
                     [0, 1, -1],
                     [-2, 1, 1]
-                ]).dot([forehead_data["R"], forehead_data["G"], forehead_data["B"]])
+                ]).dot([img_rgb2[:, :, 0].mean(), img_rgb2[:, :, 1].mean(), img_rgb2[:, :, 2].mean()])
                 
                 POS_s1_buffer.append(POS_matrix_operation_result[0])
                 POS_s2_buffer.append(POS_matrix_operation_result[1])
@@ -90,7 +93,7 @@ def process_video(cap, face_mesh, csv_filename):
                 CHROM_matrix_operation_result = np.array([
                     [3, -2, 0],
                     [1.5, 1, -1.5]
-                ]).dot([forehead_data["R"], forehead_data["G"], forehead_data["B"]])
+                ]).dot([img_rgb2[:, :, 0].mean(), img_rgb2[:, :, 1].mean(), img_rgb2[:, :, 2].mean()])
                 CHROM_x_buffer.append(CHROM_matrix_operation_result[0])
                 CHROM_y_buffer.append(CHROM_matrix_operation_result[1])
 
@@ -100,9 +103,9 @@ def process_video(cap, face_mesh, csv_filename):
 
                 # CHROM Algorithm END---------------------------------------
 
-                red_buffer.append(forehead_data["R"])
-                green_buffer.append(forehead_data["G"])
-                blue_buffer.append(forehead_data["B"])
+                red_buffer.append(img_rgb2[:, :, 0].mean())
+                green_buffer.append(img_rgb2[:, :, 1].mean())
+                blue_buffer.append(img_rgb2[:, :, 2].mean())
 
                 if len(red_buffer) > buffer_size:
                     red_buffer.pop(0)
@@ -116,14 +119,18 @@ def process_video(cap, face_mesh, csv_filename):
                     DC_green = np.mean(green_buffer)
                     DC_blue = np.mean(blue_buffer)
 
-                    if len(AC_red_buffer) > buffer_size:
+                    AC_red = img_rgb2[:, :, 0].mean() - DC_red
+                    AC_green = img_rgb2[:, :, 1].mean() - DC_green
+                    AC_blue = img_rgb2[:, :, 2].mean() - DC_blue
+
+                    AC_red_buffer = np.append(AC_red_buffer, AC_red)
+                    AC_green_buffer = np.append(AC_green_buffer, AC_green)
+                    AC_blue_buffer = np.append(AC_blue_buffer, AC_blue)
+
+                    if len(AC_red_buffer) > 30:
                         AC_red_buffer = AC_red_buffer[1:]
                         AC_green_buffer = AC_green_buffer[1:]
                         AC_blue_buffer = AC_blue_buffer[1:]
-
-                    AC_red_buffer = np.append(AC_red_buffer, red_buffer)
-                    AC_green_buffer = np.append(AC_green_buffer, green_buffer)
-                    AC_blue_buffer = np.append(AC_blue_buffer, blue_buffer)
 
                     max_AC_red = np.max(AC_red_buffer)
                     max_AC_green = np.max(AC_green_buffer)
@@ -132,16 +139,14 @@ def process_video(cap, face_mesh, csv_filename):
                     min_AC_green = np.min(AC_green_buffer)
                     min_AC_blue = np.min(AC_blue_buffer)
 
-                    AC_red = max_AC_red - min_AC_red
-                    AC_green = max_AC_green - min_AC_green
-                    AC_blue = max_AC_blue - min_AC_blue
+                    RR = np.log((max_AC_red-min_AC_red)) / np.log((max_AC_blue-min_AC_blue))
 
-                    # Check if AC_red and AC_blue are positive
-                    RR = AC_red / AC_blue
-                
-                    df.loc[df.index[-1], 'AC_red'] = np.log(AC_red)
-                    df.loc[df.index[-1], 'AC_green'] = np.log(AC_green)
-                    df.loc[df.index[-1], 'AC_blue'] = np.log(AC_blue)
+                    df.loc[df.index[-1], 'AC_red'] = max_AC_red - min_AC_red
+                    df.loc[df.index[-1], 'DC_red'] = DC_red
+                    df.loc[df.index[-1], 'AC_green'] = max_AC_green - min_AC_green
+                    df.loc[df.index[-1], 'DC_green'] = DC_green
+                    df.loc[df.index[-1], 'AC_blue'] = max_AC_blue - min_AC_blue
+                    df.loc[df.index[-1], 'DC_blue'] = DC_blue
                     df.loc[df.index[-1], 'RR'] = RR
 
                     # For POS Algorithm-----------------------------------------
@@ -155,11 +160,11 @@ def process_video(cap, face_mesh, csv_filename):
                     max_POS = np.max(POS_raw_buffer)
                     min_POS = np.min(POS_raw_buffer)
 
-                    if (max_POS - min_POS) == 0:
-                        POS_AC = 0
-                    else:
-                        POS_AC = np.log(max_POS - min_POS)
-
+                    # if (max_POS - min_POS) == 0:
+                    #     POS_AC = 0
+                    # else:
+                    POS_AC = max_POS - min_POS
+                    # df.loc[df.index[-1], 'POS'] = POS_raw
                     df.loc[df.index[-1], 'POS_AC'] = POS_AC
                     # POS Algorithm END-----------------------------------------
 
@@ -175,11 +180,12 @@ def process_video(cap, face_mesh, csv_filename):
                 max_CHROM = np.max(CHROM_raw_buffer)
                 min_CHROM = np.min(CHROM_raw_buffer)
 
-                if (max_CHROM - min_CHROM) == 0:
-                    CHROM_AC = 0
-                else:
-                    CHROM_AC = np.log(max_CHROM - min_CHROM)
+                # if (max_CHROM - min_CHROM) == 0:
+                #     CHROM_AC = 0
+                # else:
+                CHROM_AC = max_CHROM - min_CHROM
 
+                # df.loc[df.index[-1], 'CHROM'] = bvp_chrom
                 df.loc[df.index[-1], 'CHROM_AC'] = CHROM_AC
                 # CHROM Algorithm END---------------------------------------
 
@@ -223,25 +229,25 @@ def main():
         ]
 
         csv_filename = [
-            'output/Sub_9_0.csv',
-            'output/Sub_18_0.csv',
-            'output/Sub_18_1.csv',
-            'output/Sub_19_0.csv',
-            'output/Sub_19_1.csv',
-            'output/Sub_21_1.csv',
-            'output/Sub_21_2.csv',
-            'output/Sub_22_1.csv',
-            'output/Sub_22_2.csv',
-            'output/Sub_23_1.csv',
-            'output/Sub_23_2.csv',
-            'output/Sub_24_0.csv',
-            'output/Sub_24_1.csv',
-            'output/Sub_25_0.csv',
-            'output/Sub_25_1.csv',
-            'output/Sub_26_0.csv',
-            'output/Sub_26_1.csv',
-            'output/Sub_29_0.csv',
-            'output/Sub_30_0.csv',
+            'output_filter/Sub_9_0.csv',
+            'output_filter/Sub_18_0.csv',
+            'output_filter/Sub_18_1.csv',
+            'output_filter/Sub_19_0.csv',
+            'output_filter/Sub_19_1.csv',
+            'output_filter/Sub_21_1.csv',
+            'output_filter/Sub_21_2.csv',
+            'output_filter/Sub_22_1.csv',
+            'output_filter/Sub_22_2.csv',
+            'output_filter/Sub_23_1.csv',
+            'output_filter/Sub_23_2.csv',
+            'output_filter/Sub_24_0.csv',
+            'output_filter/Sub_24_1.csv',
+            'output_filter/Sub_25_0.csv',
+            'output_filter/Sub_25_1.csv',
+            'output_filter/Sub_26_0.csv',
+            'output_filter/Sub_26_1.csv',
+            'output_filter/Sub_29_0.csv',
+            'output_filter/Sub_30_0.csv',
         ]
 
         for video_path, csv_filename in zip(video_path, csv_filename):
